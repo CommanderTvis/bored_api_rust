@@ -7,7 +7,7 @@ mod boredapi {
     use std::borrow::Borrow;
     use std::cmp;
 
-    #[derive(strum_macros::EnumString, strum_macros::ToString, cmp::PartialEq)]
+    #[derive(strum_macros::EnumString, strum_macros::ToString, cmp::PartialEq, fmt::Debug)]
     pub enum ActivityType {
         #[strum(serialize = "education")]
         Education,
@@ -29,22 +29,14 @@ mod boredapi {
         Busywork,
     }
 
+    #[derive(fmt::Debug)]
     pub enum Error {
         HttpError(reqwest::Error),
         ApiError(String),
-        BadResponse(i64),
+        BadResponse,
     }
 
-    impl fmt::Display for Error {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            return match self {
-                Error::HttpError(e) => write!(f, "HttpError({})", e.to_string()),
-                Error::ApiError(e) => write!(f, "ApiError({})", e),
-                Error::BadResponse(i) => write!(f, "BadResponse({})", i),
-            };
-        }
-    }
-
+    #[derive(fmt::Debug)]
     pub struct Activity {
         pub description: String,
         pub accessibility: f64,
@@ -55,20 +47,7 @@ mod boredapi {
         pub key: u64,
     }
 
-    impl fmt::Display for Activity {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            write!(f,
-                   "Activity(description={}, accessibility={}, activity_type={}, participants={}, price={}, link={}, key={})",
-                   self.description,
-                   self.accessibility,
-                   self.activity_type.to_string(),
-                   self.participants,
-                   self.price,
-                   self.link.as_ref().unwrap_or(&"None".to_string()),
-                   self.key)
-        }
-    }
-
+    #[derive(fmt::Debug)]
     pub struct ActivityCriterion<T> {
         name: &'static str,
         phantom: marker::PhantomData<T>,
@@ -140,6 +119,7 @@ mod boredapi {
         }
     }
 
+    #[derive(fmt::Debug)]
     pub struct BoredApi {
         pub url: &'static str,
         pub client: reqwest::Client,
@@ -148,6 +128,12 @@ mod boredapi {
     impl Default for BoredApi {
         fn default() -> Self {
             BoredApi { url: "http://www.boredapi.com/api/activity", client: reqwest::Client::new() }
+        }
+    }
+
+    impl Clone for BoredApi {
+        fn clone(&self) -> Self {
+            return BoredApi { url: self.url, client: self.client.clone() };
         }
     }
 
@@ -172,43 +158,41 @@ mod boredapi {
             };
         }
 
+        #[inline]
         fn deserialize(self, json: serde_json::Value) -> Result<Activity, Error> {
+            macro_rules! extract_field {
+            ($name:expr, $extractor:ident) => {
+                json.get($name).ok_or(Error::BadResponse)?.$extractor().ok_or(Error::BadResponse)?
+            };
+            }
+
+            macro_rules! extract_field_optional {
+            ($name:expr, $extractor:ident) => {
+                json.get($name).map(|s| s.$extractor())
+            };
+            }
+
             if let Some(err) = json.get("errors") {
                 return Err(err
                     .as_str()
                     .map(|s| Error::ApiError(s.to_string()))
-                    .unwrap_or(Error::BadResponse(0)));
+                    .unwrap_or(Error::BadResponse));
             }
 
-            return Ok(Activity {
-                description: json.get("activity").ok_or(Error::BadResponse(1))?.as_str()
-                    .ok_or(Error::BadResponse(2))?
-                    .to_string(),
+            Ok(Activity {
+                description: extract_field!("activity", as_str).to_string(),
+                accessibility: extract_field!("accessibility", as_f64),
+                activity_type: ActivityType::from_str(extract_field!("type", as_str)).unwrap(),
+                participants: extract_field!("participants", as_u64),
+                price: extract_field!("price", as_f64),
 
-                accessibility: json.get("accessibility").ok_or(Error::BadResponse(3))?.as_f64()
-                    .ok_or(Error::BadResponse(4))?,
-
-                activity_type: ActivityType::from_str(json.get("type").ok_or(Error::BadResponse(5))?
-                    .as_str()
-                    .ok_or(Error::BadResponse(6))?)
-                    .unwrap(),
-
-                participants: json.get("participants").ok_or(Error::BadResponse(7))?.as_u64()
-                    .ok_or(Error::BadResponse(8))?,
-
-                price: json.get("price").ok_or(Error::BadResponse(9))?.as_f64()
-                    .ok_or(Error::BadResponse(10))?,
-
-                link: match json.get("link").map(|s| s.as_str()) {
+                link: match extract_field_optional!("link", as_str) {
                     None => None,
-                    Some(some) => Some(some.ok_or(Error::BadResponse(11))?.to_string()),
+                    Some(some) => Some(some.ok_or(Error::BadResponse)?.to_string()),
                 },
 
-                key: json.get("key").ok_or(Error::BadResponse(12))?.as_str()
-                    .ok_or(Error::BadResponse(13))
-                    ?.parse::<u64>()
-                    .map_err(|e| Error::BadResponse(14))?,
-            });
+                key: extract_field!("key", as_str).parse::<u64>().map_err(|e| Error::BadResponse)?,
+            })
         }
     }
 }
@@ -228,7 +212,7 @@ mod tests {
     #[test]
     fn random() {
         match aw!(boredapi::BoredApi::default().random()) {
-            Ok(a) => { println!("{}", a); }
+            Ok(a) => { println!("{:?}", a); }
             Err(_) => assert!(false),
         }
     }
@@ -237,8 +221,8 @@ mod tests {
     fn by_criteria() {
         match aw!(boredapi::BoredApi::default().by_criteria(|sel| sel.set(boredapi::TYPE, boredapi::ActivityType::Busywork))) {
             Ok(a) => {
-                assert!(a.activity_type == boredapi::ActivityType::Busywork);
-                println!("{}", a)
+                assert_eq!(a.activity_type, boredapi::ActivityType::Busywork);
+                println!("{:?}", a)
             }
             Err(_) => assert!(false),
         }
