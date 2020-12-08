@@ -3,8 +3,14 @@ name = "bored_api"
 version = "0.1.0"
 authors = ["Iaroslav Postovalov <postovalovya@gmail.com>"]
 edition = "2018"
+readme = "README.md"
+repository = "https://github.com/CommanderTvis/bored_api_rust"
+license-file = "LICENSE.txt"
+keywords = ["bored", "api", "public-api"]
+categories = ["api-bindings"]
 
 [dependencies]
+url = "*"
 reqwest = { version = "0.10", features = ["json"] }
 tokio = { version = "0.2", features = ["full"] }
 serde_json = { version = "1.0.57" }

@@ -6,8 +6,11 @@ mod boredapi {
     use std::{fmt, collections, marker};
     use std::borrow::Borrow;
     use std::cmp;
+    use url;
+    use std::marker::PhantomData;
 
-    #[derive(strum_macros::EnumString, strum_macros::ToString, cmp::PartialEq, fmt::Debug)]
+    /// Represents a type of activity in Bored API.
+    #[derive(strum_macros::EnumString, strum_macros::ToString, cmp::PartialEq, cmp::Eq, fmt::Debug)]
     pub enum ActivityType {
         #[strum(serialize = "education")]
         Education,
@@ -29,13 +32,19 @@ mod boredapi {
         Busywork,
     }
 
+    /// Combines all possible errors of the API wrapper.
     #[derive(fmt::Debug)]
     pub enum Error {
+        /// Error returned by reqwest.
         HttpError(reqwest::Error),
+        /// Error returned by API.
         ApiError(String),
+        /// Error caused by a bad read of API response. Possible problems are invalid Bored API
+        /// backend or bug in the wrapper.
         BadResponse,
     }
 
+    /// Represents Activity entity of Bored API.
     #[derive(fmt::Debug)]
     pub struct Activity {
         pub description: String,
@@ -43,61 +52,75 @@ mod boredapi {
         pub activity_type: ActivityType,
         pub participants: u64,
         pub price: f64,
-        pub link: Option<String>,
+        pub link: Option<url::Url>,
         pub key: u64,
+        dummy: PhantomData<()>,
+    }
+
+    impl Activity {
+        pub fn new(description: String,
+                   accessibility: f64,
+                   activity_type: ActivityType,
+                   participants: u64,
+                   price: f64,
+                   link: Option<url::Url>,
+                   key: u64) -> Self {
+            Activity { description, accessibility, activity_type, participants, price, link, key, dummy: PhantomData {} }
+        }
     }
 
     #[derive(fmt::Debug)]
     pub struct ActivityCriterion<T> {
         name: &'static str,
-        phantom: marker::PhantomData<T>,
+        validate: fn(T) -> bool,
     }
 
     pub const EXACT_ACCESSIBILITY: ActivityCriterion<f64> = ActivityCriterion {
         name: "accessibility",
-        phantom: marker::PhantomData,
+        validate: |v| (0.0..1.0).contains(&v),
     };
 
     pub const EXACT_PRICE: ActivityCriterion<f64> = ActivityCriterion {
         name: "price",
-        phantom: marker::PhantomData,
+        validate: |v| (0.0..1.0).contains(&v),
     };
 
     pub const KEY: ActivityCriterion<u64> = ActivityCriterion {
         name: "key",
-        phantom: marker::PhantomData,
+        validate: |v| (1000000..9999999).contains(&v),
     };
 
     pub const MAX_ACCESSIBILITY: ActivityCriterion<f64> = ActivityCriterion {
         name: "maxaccessibility",
-        phantom: marker::PhantomData,
+        validate: |v| (0.0..1.0).contains(&v),
     };
 
     pub const MAX_PRICE: ActivityCriterion<f64> = ActivityCriterion {
         name: "maxprice",
-        phantom: marker::PhantomData,
+        validate: |v| (0.0..1.0).contains(&v),
     };
 
     pub const MIN_ACCESSIBILITY: ActivityCriterion<f64> = ActivityCriterion {
         name: "minaccessibility",
-        phantom: marker::PhantomData,
+        validate: |v| (0.0..1.0).contains(&v),
     };
 
     pub const MIN_PRICE: ActivityCriterion<f64> = ActivityCriterion {
         name: "minprice",
-        phantom: marker::PhantomData,
+        validate: |v| (0.0..1.0).contains(&v),
     };
 
     pub const PARTICIPANTS: ActivityCriterion<u64> = ActivityCriterion {
         name: "participants",
-        phantom: marker::PhantomData,
+        validate: |v| (0..u64::MAX).contains(&v),
     };
 
     pub const TYPE: ActivityCriterion<ActivityType> = ActivityCriterion {
         name: "type",
-        phantom: marker::PhantomData,
+        validate: |_| true,
     };
 
+    #[derive(fmt::Debug)]
     pub struct CriteriaSelection { parameters: collections::HashMap<String, String> }
 
     impl CriteriaSelection {
@@ -139,23 +162,20 @@ mod boredapi {
 
     impl BoredApi {
         pub async fn random(self) -> Result<Activity, Error> {
-            self.request_activity(&collections::HashMap::new()).await
+            self.by_criteria(|s| s).await
         }
 
         pub async fn by_criteria<F: FnOnce(CriteriaSelection) -> CriteriaSelection>(self, selection: F) -> Result<Activity, Error> {
             let mut sel = CriteriaSelection::default();
             sel = selection(sel);
-            return self.request_activity(sel.parameters.borrow()).await;
-        }
 
-        async fn request_activity(self, params: &collections::HashMap<String, String>) -> Result<Activity, Error> {
-            return match self.client.get(self.url).query(&params).send().await {
+            match self.client.get(self.url).query(&sel.parameters.borrow()).send().await {
                 Ok(r) => match r.json::<serde_json::Value>().await {
                     Ok(val) => self.deserialize(val),
                     Err(r) => Err(Error::HttpError(r))
                 },
                 Err(r) => Err(Error::HttpError(r)),
-            };
+            }
         }
 
         #[inline]
@@ -166,33 +186,26 @@ mod boredapi {
             };
             }
 
-            macro_rules! extract_field_optional {
-            ($name:expr, $extractor:ident) => {
-                json.get($name).map(|s| s.$extractor())
-            };
-            }
-
-            if let Some(err) = json.get("errors") {
+            if let Some(err) = json.get("error") {
                 return Err(err
                     .as_str()
                     .map(|s| Error::ApiError(s.to_string()))
                     .unwrap_or(Error::BadResponse));
             }
 
-            Ok(Activity {
-                description: extract_field!("activity", as_str).to_string(),
-                accessibility: extract_field!("accessibility", as_f64),
-                activity_type: ActivityType::from_str(extract_field!("type", as_str)).unwrap(),
-                participants: extract_field!("participants", as_u64),
-                price: extract_field!("price", as_f64),
-
-                link: match extract_field_optional!("link", as_str) {
-                    None => None,
-                    Some(some) => Some(some.ok_or(Error::BadResponse)?.to_string()),
+            Ok(Activity::new(
+                extract_field!("activity", as_str).to_string(),
+                extract_field!("accessibility", as_f64),
+                ActivityType::from_str(extract_field!("type", as_str))
+                    .map_err(|_| Error::BadResponse)?,
+                extract_field!("participants", as_u64),
+                extract_field!("price", as_f64),
+                match extract_field!("link", as_str) {
+                    "" => None,
+                    s => Some(url::Url::parse(s).map_err(|_| Error::BadResponse)?),
                 },
-
-                key: extract_field!("key", as_str).parse::<u64>().map_err(|e| Error::BadResponse)?,
-            })
+                extract_field!("key", as_str).parse::<u64>().map_err(|e| Error::BadResponse)?,
+            ))
         }
     }
 }
@@ -225,6 +238,18 @@ mod tests {
                 println!("{:?}", a)
             }
             Err(_) => assert!(false),
+        }
+    }
+
+    #[test]
+    fn no_activity() {
+        match aw!(boredapi::BoredApi::default().by_criteria(|s| s.set(boredapi::EXACT_ACCESSIBILITY, -1.0))) {
+            Ok(_) => assert!(false),
+            Err(e) => match e {
+                Error::HttpError(_) => assert!(false),
+                Error::ApiError(e) => { assert_eq!(e, "No activity found with the specified parameters") }
+                Error::BadResponse => assert!(false),
+            },
         }
     }
 }
